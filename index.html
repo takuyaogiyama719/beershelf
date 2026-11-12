@@ -6463,8 +6463,8 @@ body[data-light="warm"] {
 (function (NS) {
   'use strict';
 
-  const TARGET_DEG = 400;      // 1周＋少し（数え方が少なめに出るのを補正した上で、実際は 450° 前後）
-  const DEG_GAIN = 1.15;       // 帯の端ほど動きが小さく見える・速い所で数え漏れる分の補正（実測から）
+  const TARGET_DEG = 460;      // 1周＋余裕（つなぎ目を確かめるには、最初の正面をはっきり過ぎる必要がある）
+  const DEG_GAIN = 1.0;        // iPhone 実機では多めに出ていた（向きを無視して足していたため）。向き付きで足すので補正なし
   const FAST_DPS = 80;         // これより速いと、ぶれて文字が読めなくなる（°/秒）
   const AW = 240;              // その場の解析に使う縮小画像の幅
 
@@ -6544,7 +6544,7 @@ body[data-light="warm"] {
       const ring = el.querySelector('.cap-ring .fg'), degEl = el.querySelector('.cap-deg'), go = el.querySelector('.cap-go');
       const guideSvg = el.querySelector('.cap-guide');
       let stream = null, rec = null, chunks = [], state = 'aim', closed = false;
-      let deg = 0, prevBand = null, prevBg = null, tStart = 0, tSpin = 0, lastMove = 0, lastT = 0, recMime = '';
+      let deg = 0, signed = 0, prevBand = null, prevBg = null, tStart = 0, tSpin = 0, lastMove = 0, lastT = 0, recMime = '';
       const speedHist = [];
       const ac = document.createElement('canvas'), actx = ac.getContext('2d', { willReadFrequently: true });
 
@@ -6590,13 +6590,16 @@ body[data-light="warm"] {
             const s = shiftOf(prevBand, band, 16);
             const dt = Math.max(1e-3, now - lastT);
             const rpx = GUIDE.w * W / 2;             // 縮小画像での缶の半径
-            const dDeg = s.ratio > 1.25 && !s.edge ? Math.abs(s.dx) / rpx * 180 / Math.PI * DEG_GAIN : 0;
+            // 向き付きで足す（止まっている間の揺れは打ち消し合う。向きを無視すると、揺れの分だけ多く数えてしまう）
+            const sDeg = s.ratio > 1.25 && !s.edge ? s.dx / rpx * 180 / Math.PI * DEG_GAIN : 0;
+            const dDeg = Math.abs(sDeg);
             speedHist.push(dDeg / dt); if (speedHist.length > 6) speedHist.shift();
             const sp = speedHist.slice().sort((a, b) => a - b)[speedHist.length >> 1];
             if (state === 'hold') {
               if (now - tStart > 0.8) { state = 'spin'; tSpin = now; lastMove = now; msg.textContent = 'ゆっくり回してください（10秒くらいで1周）'; drawGuide(); }
             } else {
-              if (dDeg > 0.15) { deg += dDeg; lastMove = now; }
+              signed += sDeg; deg = Math.max(deg, Math.abs(signed));
+              if (dDeg > 0.3) lastMove = now;
               setRing();
               if (s.edge) w = w || '回すのが速すぎます。もう少しゆっくり';
               else if (sp > FAST_DPS) w = w || '少し速いです。ゆっくり回してください';
@@ -6626,7 +6629,7 @@ body[data-light="warm"] {
           finish({ file, params: { ...GUIDE }, deg, secs, mime: type, w: v.videoWidth, h: v.videoHeight });
         };
         rec.start(500);
-        tStart = performance.now() / 1000; state = 'hold'; deg = 0; setRing();
+        tStart = performance.now() / 1000; state = 'hold'; deg = 0; signed = 0; setRing();
         msg.textContent = 'そのまま1秒…';
         go.textContent = '停止'; go.dataset.a = 'stop'; go.disabled = false;
         drawGuide();
@@ -7573,7 +7576,10 @@ body[data-light="warm"] {
 
     const stepResult = () => {
       const s = spin.stats;
-      const verdict = { good: 'きれいに1周つながりました', fair: '1周つながりましたが、回転が1周に少し足りない可能性があります', poor: '1周を確認できませんでした（回し方が足りない／缶を見失った可能性）' }[s.quality];
+      const short = s.quality === 'poor' && s.turn && s.turn < 380;
+      const verdict = short
+        ? `回した量が1周に足りませんでした（約 ${Math.round(s.turn)}°）。最初の正面をはっきり過ぎるまで、もう少し長く回して撮り直してください`
+        : { good: 'きれいに1周つながりました', fair: '1周つながりましたが、回転が1周に少し足りない可能性があります', poor: '1周を確認できませんでした（回し方が足りない／缶を見失った可能性）' }[s.quality];
       flow.innerHTML = `
         <header class="flow-head">
           <button class="icon-btn" data-a="back" aria-label="戻る">${backIcon}</button>
