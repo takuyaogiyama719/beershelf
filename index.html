@@ -598,6 +598,7 @@ body[data-light="warm"] {
 .cap-ring .fg { stroke: #e9b860; stroke-linecap: round; transition: stroke-dashoffset .15s linear; }
 .cap-deg { position: absolute; inset: 0; display: grid; place-items: center; font-size: 15px; }
 .cap-go { min-width: 150px; }
+.cap-guide path.found { stroke: #ffffff; stroke-dasharray: none; stroke-width: 2.5; }
 </style>
 </head>
 <body data-view="shelf">
@@ -6546,6 +6547,8 @@ body[data-light="warm"] {
       let stream = null, rec = null, chunks = [], state = 'aim', closed = false;
       let deg = 0, signed = 0, prevBand = null, prevBg = null, tStart = 0, tSpin = 0, lastMove = 0, lastT = 0, recMime = '';
       const speedHist = [];
+      let G = { ...GUIDE }, found = false, lastDet = 0, bgDx = 0;
+      const dc = document.createElement('canvas'), dctx = dc.getContext('2d', { willReadFrequently: true });
       const ac = document.createElement('canvas'), actx = ac.getContext('2d', { willReadFrequently: true });
 
       const finish = (out) => {
@@ -6564,12 +6567,38 @@ body[data-light="warm"] {
       const drawGuide = () => {
         const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return;
         const bw = v.clientWidth, bh = v.clientHeight, s = Math.min(bw / vw, bh / vh), ox = (bw - vw * s) / 2, oy = (bh - vh * s) / 2;
-        const L = ox + (GUIDE.cx - GUIDE.w / 2) * vw * s, R = ox + (GUIDE.cx + GUIDE.w / 2) * vw * s;
-        const T = oy + GUIDE.top * vh * s, B = oy + GUIDE.bot * vh * s, e = (R - L) * 0.12;
+        const L = ox + (G.cx - G.w / 2) * vw * s, R = ox + (G.cx + G.w / 2) * vw * s;
+        const T = oy + G.top * vh * s, B = oy + G.bot * vh * s, e = (R - L) * 0.12;
         guideSvg.setAttribute('viewBox', `0 0 ${bw} ${bh}`);
-        guideSvg.innerHTML = `<path d="M${L + e} ${T} Q${(L + R) / 2} ${T - e * 0.6} ${R - e} ${T} L${R} ${T + e * 1.6} L${R} ${B - e * 0.8} Q${(L + R) / 2} ${B + e * 0.5} ${L} ${B - e * 0.8} L${L} ${T + e * 1.6} Z" class="${state === 'spin' || state === 'hold' ? 'on' : ''}"/>`;
+        guideSvg.innerHTML = `<path d="M${L + e} ${T} Q${(L + R) / 2} ${T - e * 0.6} ${R - e} ${T} L${R} ${T + e * 1.6} L${R} ${B - e * 0.8} Q${(L + R) / 2} ${B + e * 0.5} ${L} ${B - e * 0.8} L${L} ${T + e * 1.6} Z" class="${state === 'spin' || state === 'hold' ? 'on' : found ? 'found' : ''}"/>`;
       };
       window.addEventListener('resize', drawGuide);
+
+      // 缶の検出：缶の左右の縦の輪郭（360° 処理と同じ方法）→ だめなら写真用の検出
+      const detectCan = () => {
+        try {
+          const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return;
+          const W = 540, H = Math.round(540 * vh / vw);
+          if (dc.width !== W) { dc.width = W; dc.height = H; }
+          dctx.drawImage(v, 0, 0, W, H);
+          let p = null;
+          try {
+            const g = NS.fastSpin.measure(dctx.getImageData(0, 0, W, H).data, W, H);
+            const ww = g.hw * 2, hh = g.bot - g.top;
+            if (ww > W * 0.15 && hh > ww * 1.1 && hh < ww * 2.6) p = { cx: g.cx / W, w: ww / W, top: Math.max(0, (g.top - ww * 0.2) / H), bot: Math.min(1, (g.bot + ww * 0.1) / H) };
+          } catch (e) { /* 次へ */ }
+          if (!p && NS.cutout) {
+            const q = NS.cutout.detectBest(dc);
+            const hh = (q.bot - q.top) * H, ww = q.w * W;
+            if (q && ww > W * 0.15 && hh > ww * 1.2 && hh < ww * 2.8) p = { cx: q.cx, w: q.w, top: q.top, bot: q.bot };
+          }
+          if (!p) { found = false; drawGuide(); return; }
+          const a = found ? 0.5 : 1;   // 見つかり始めは一気に、その後はなめらかに
+          G = { cx: G.cx + (p.cx - G.cx) * a, w: G.w + (p.w - G.w) * a, top: G.top + (p.top - G.top) * a, bot: G.bot + (p.bot - G.bot) * a, angle: 0 };
+          found = true; drawGuide();
+          msg.textContent = '缶を見つけました。枠が缶に合っていれば「撮影開始」';
+        } catch (e) { /* 検出できない時は枠をそのまま */ }
+      };
 
       const analyze = () => {
         if (closed) return;
@@ -6583,13 +6612,21 @@ body[data-light="warm"] {
           // 明るさ
           let sum = 0; for (let i = 0; i < d.length; i += 64) sum += d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11;
           const lum = sum / (d.length / 64);
-          const band = bandOf(d, W, H, GUIDE), bg = bgBlock(d, W, H, GUIDE);
+          const band = bandOf(d, W, H, G), bg = bgBlock(d, W, H, G);
           let w = null;
-          if (prevBg) { const s = shiftOf(prevBg, bg, 3); if (s.ratio > 1.5 && Math.abs(s.dx) >= 1.5) w = 'スマホが動いています。机などに立てかけて固定してください'; }
+          bgDx = 0;
+          if (prevBg) {
+            const s = shiftOf(prevBg, bg, 6);
+            if (s.ratio > 1.4) bgDx = s.dx;           // 背景ごと動いた分（手ぶれ）。缶の回転から差し引く
+            if (s.ratio > 1.5 && Math.abs(s.dx) >= 1.5) w = 'スマホが動いています。机などに立てかけて固定してください';
+          }
+          // 撮影前：缶の位置と大きさを探して、枠を合わせる（0.6 秒ごと）
+          if (state === 'aim' && now - lastDet > 0.6) { lastDet = now; detectCan(); }
           if (prevBand && (state === 'hold' || state === 'spin')) {
-            const s = shiftOf(prevBand, band, 16);
+            const s0 = shiftOf(prevBand, band, 16);
+            const s = { ...s0, dx: s0.dx - bgDx };     // 手ぶれで全体が動いた分は回転に数えない
             const dt = Math.max(1e-3, now - lastT);
-            const rpx = GUIDE.w * W / 2;             // 縮小画像での缶の半径
+            const rpx = G.w * W / 2;                 // 縮小画像での缶の半径
             // 向き付きで足す（止まっている間の揺れは打ち消し合う。向きを無視すると、揺れの分だけ多く数えてしまう）
             const sDeg = s.ratio > 1.25 && !s.edge ? s.dx / rpx * 180 / Math.PI * DEG_GAIN : 0;
             const dDeg = Math.abs(sDeg);
@@ -6626,7 +6663,7 @@ body[data-light="warm"] {
           const ext = type.includes('webm') ? 'webm' : 'mp4';
           const file = new File(chunks, `canshelf-360-${Date.now()}.${ext}`, { type });
           const secs = performance.now() / 1000 - tStart;
-          finish({ file, params: { ...GUIDE }, deg, secs, mime: type, w: v.videoWidth, h: v.videoHeight });
+          finish({ file, params: { ...G }, deg, secs, mime: type, w: v.videoWidth, h: v.videoHeight });
         };
         rec.start(500);
         tStart = performance.now() / 1000; state = 'hold'; deg = 0; signed = 0; setRing();
@@ -6665,7 +6702,7 @@ body[data-light="warm"] {
         try { await v.play(); } catch (e) { /* 自動再生の制限：表示はされる */ }
         await new Promise((r) => (v.videoWidth ? r() : (v.onloadedmetadata = r)));
         drawGuide(); setTimeout(drawGuide, 300);
-        msg.textContent = '缶を枠に合わせてください（上から下まで全体）';
+        msg.textContent = '缶を画面の中央に（上から下まで全体）。近すぎるとピントが合わないので 30cm ほど離してください';
         go.disabled = false;
         analyze();
       })();
