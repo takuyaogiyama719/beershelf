@@ -6329,6 +6329,8 @@ body[data-light="warm"] {
           const o1 = (rr * KW + i) * 3, o2 = o1 + KW * 3, K = fr.keep;
           const R = K[o1] + (K[o2] - K[o1]) * fy, G = K[o1 + 1] + (K[o2 + 1] - K[o1 + 1]) * fy, B = K[o1 + 2] + (K[o2 + 2] - K[o1 + 2]) * fy;
           let w = r < skinRows && isSkin(R, G, B) ? w0 * 0.002 : w0;
+          // 反射で白く飛んだ画素は使わない（隣のコマの、反射していない絵で埋まる）— spin-scan の方式
+          if (R > 245 && G > 245 && B > 245) w *= 0.03;
           // 下の方で、となりのコマと同じ場所の色がほとんど変わらない画素は、回っていない＝机・背景。ほぼ使わない
           // 上の方（肩・ラベルの上の地）も同じ：止まっている模様は、缶に描かれたものではない
           if (KN && (rr >= bgRow || rr < topRow)) {
@@ -6464,7 +6466,9 @@ body[data-light="warm"] {
 (function (NS) {
   'use strict';
 
-  const TARGET_DEG = 460;      // 1周＋余裕（つなぎ目を確かめるには、最初の正面をはっきり過ぎる必要がある）
+  const TARGET_DEG = 620;      // 最後の安全装置。ふつうは「最初の絵柄がもう一度見えたら」止める（spin-scan の方式）
+  const LOOP_MIN_DEG = 280;    // これより前は、一周したかの照合をしない（似た柄の繰り返しで早く止まらないように）
+  const LOOP_EXTRA_DEG = 45;   // 一周を確認してから、さらに回す量（つなぎ目の重なり）
   const DEG_GAIN = 1.0;        // iPhone 実機では多めに出ていた（向きを無視して足していたため）。向き付きで足すので補正なし
   const FAST_DPS = 80;         // これより速いと、ぶれて文字が読めなくなる（°/秒）
   const AW = 240;              // その場の解析に使う縮小画像の幅
@@ -6513,6 +6517,24 @@ body[data-light="warm"] {
     let sub = 0; if (l != null && r != null) { const den = l - 2 * best + r; if (den > 0) sub = Math.max(-0.5, Math.min(0.5, 0.5 * (l - r) / den)); }
     return { dx: bx + sub, cost: best, ratio: med / Math.max(best, 0.5), edge: Math.abs(bx) === R };
   }
+  /* 帯の真ん中半分（ひな形）を、今の帯の中で左右にずらして探し、いちばん似ている所の相関（-1〜1）を返す */
+  function nccBest(ref, cur) {
+    const { w, h } = ref; if (cur.w !== w || cur.h !== h) return -1;
+    const tw = Math.floor(w / 2), t0 = Math.floor(w / 4);
+    let tm = 0, n = 0; for (let y = 0; y < h; y += 2) for (let x = t0; x < t0 + tw; x++) { tm += ref.b[y * w + x]; n++; } tm /= n;
+    let tv = 0; for (let y = 0; y < h; y += 2) for (let x = t0; x < t0 + tw; x++) { const d = ref.b[y * w + x] - tm; tv += d * d; }
+    if (tv < n * 25) return -1;    // 無地すぎて比べられない
+    let best = -1;
+    for (let o = 0; o + tw <= w; o++) {
+      let cm = 0; for (let y = 0; y < h; y += 2) for (let x = 0; x < tw; x++) cm += cur.b[y * w + o + x]; cm /= n;
+      let cv = 0, cc = 0;
+      for (let y = 0; y < h; y += 2) for (let x = 0; x < tw; x++) { const a = ref.b[y * w + t0 + x] - tm, b = cur.b[y * w + o + x] - cm; cv += b * b; cc += a * b; }
+      const r = cc / Math.sqrt(tv * cv + 1e-6); if (r > best) best = r;
+    }
+    return best;
+  }
+  const sharpOf = (bd) => { let s = 0; for (let y = 0; y < bd.h; y += 2) for (let x = 1; x < bd.w; x++) s += Math.abs(bd.b[y * bd.w + x] - bd.b[y * bd.w + x - 1]); return s / (bd.h * bd.w / 2); };
+
   /* 枠の外（背景）の動き：スマホが動いたかどうか */
   function bgBlock(d, W, H, g) {
     const x1 = Math.max(4, Math.round((g.cx - g.w * 0.62) * W)), y0 = Math.round(H * 0.3), y1 = Math.round(H * 0.7);
@@ -6548,6 +6570,7 @@ body[data-light="warm"] {
       let deg = 0, signed = 0, prevBand = null, prevBg = null, tStart = 0, tSpin = 0, lastMove = 0, lastT = 0, recMime = '';
       const speedHist = [];
       let G = { ...GUIDE }, found = false, lastDet = 0, bgDx = 0;
+      let refs = [], loopAt = null, revRun = 0, loopHits = 0; const sharpHist = [];
       const dc = document.createElement('canvas'), dctx = dc.getContext('2d', { willReadFrequently: true });
       const ac = document.createElement('canvas'), actx = ac.getContext('2d', { willReadFrequently: true });
 
@@ -6558,7 +6581,9 @@ body[data-light="warm"] {
       };
       const setWarn = (t) => { if (t) { warn.textContent = t; warn.hidden = false; } else warn.hidden = true; };
       const setRing = () => {
-        const p = Math.min(1, deg / TARGET_DEG);
+        // 一周を確認するまでは 400° を目安に、確認後は「確認した所＋重なり」までを残りとして表示
+        const goal = loopAt != null ? loopAt + LOOP_EXTRA_DEG : Math.max(400, deg + 30);
+        const p = Math.min(1, deg / goal);
         ring.style.strokeDashoffset = String(276.5 * (1 - p));
         degEl.textContent = Math.round(deg) + '°';
       };
@@ -6637,10 +6662,26 @@ body[data-light="warm"] {
             } else {
               signed += sDeg; deg = Math.max(deg, Math.abs(signed));
               if (dDeg > 0.3) lastMove = now;
+              // 最初の絵柄を覚えておく（回り始めてから 10°・25°・40° の所）
+              for (const a of [10, 25, 40]) if (deg >= a && !refs.some((r) => r.a === a)) refs.push({ a, band });
+              // 一周の確認：覚えた絵柄が、もう一度見えたか
+              if (loopAt == null && deg >= LOOP_MIN_DEG && refs.length) {
+                let bestR = -1; for (const r of refs) bestR = Math.max(bestR, nccBest(r.band, band));
+                if (bestR > 0.8) { loopHits++; if (loopHits >= 2) { loopAt = deg; msg.textContent = '一周しました。もう少しだけ回してください'; } }
+                else loopHits = 0;
+              }
               setRing();
-              if (s.edge) w = w || '回すのが速すぎます。もう少しゆっくり';
+              // ぶれ：直近の典型と比べて、帯のくっきり度が半分以下
+              const shp = sharpOf(band); sharpHist.push(shp); if (sharpHist.length > 15) sharpHist.shift();
+              const shMed = sharpHist.slice().sort((a, b) => a - b)[sharpHist.length >> 1];
+              // 逆回転：回っている向きと反対に、続けて動いた
+              if (Math.abs(signed) > 20 && dDeg > 1 && Math.sign(sDeg) !== Math.sign(signed)) revRun++; else if (dDeg > 1) revRun = 0;
+              if (revRun >= 3) w = w || '同じ向きに回し続けてください';
+              else if (s.edge) w = w || '回すのが速すぎます。もう少しゆっくり';
+              else if (sharpHist.length >= 8 && shp < shMed * 0.5) w = w || 'ぶれています。ゆっくり回してください';
               else if (sp > FAST_DPS) w = w || '少し速いです。ゆっくり回してください';
               else if (now - lastMove > 2.5) w = w || (deg < 20 ? '缶のフタをつまんで、回し始めてください' : '止まっています。続けて回してください');
+              if (loopAt != null && deg >= loopAt + LOOP_EXTRA_DEG) { stopRec(); return; }
               if (deg >= TARGET_DEG) { stopRec(); return; }
               if (now - tSpin > 60) { stopRec(); return; }
             }
@@ -6666,14 +6707,14 @@ body[data-light="warm"] {
           finish({ file, params: { ...G }, deg, secs, mime: type, w: v.videoWidth, h: v.videoHeight });
         };
         rec.start(500);
-        tStart = performance.now() / 1000; state = 'hold'; deg = 0; signed = 0; setRing();
+        tStart = performance.now() / 1000; state = 'hold'; deg = 0; signed = 0; refs = []; loopAt = null; loopHits = 0; revRun = 0; setRing();
         msg.textContent = 'そのまま1秒…';
         go.textContent = '停止'; go.dataset.a = 'stop'; go.disabled = false;
         drawGuide();
       };
       const stopRec = () => {
         if (state === 'done') return;
-        state = 'done'; msg.textContent = deg >= TARGET_DEG ? '1周しました。処理に進みます…' : '撮影を止めました…'; setWarn(null);
+        state = 'done'; msg.textContent = loopAt != null ? '1周しました。処理に進みます…' : '撮影を止めました…'; setWarn(null);
         go.disabled = true;
         setTimeout(() => { try { rec && rec.state !== 'inactive' ? rec.stop() : finish(null); } catch (e) { finish(null); } }, 400);
       };
