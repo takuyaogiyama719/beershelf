@@ -599,6 +599,7 @@ body[data-light="warm"] {
 .cap-deg { position: absolute; inset: 0; display: grid; place-items: center; font-size: 15px; }
 .cap-go { min-width: 150px; }
 .cap-guide path.found { stroke: #ffffff; stroke-dasharray: none; stroke-width: 2.5; }
+.cap-ring.done .fg { stroke: #7fcf8a; }
 </style>
 </head>
 <body data-view="shelf">
@@ -6024,14 +6025,16 @@ body[data-light="warm"] {
     if (opts.params && NS.cutout) {
       const g = NS.cutout.geom(opts.params, W, H);
       // 枠は缶全体（フタ・肩・底を含む）なので、胴のまっすぐな部分に縮める
-      hint = { L: g.L, R: g.R, w: g.w, top: g.top + g.w * 0.18, bot: g.bot - g.w * 0.08 };
+      hint = { L: g.L, R: g.R, w: g.w, top: g.top + g.w * 0.18, bot: g.bot - g.w * 0.03 };   // 下は底のすぐ上まで（文字を切らない）
     }
     const geo = measure(first, W, H, hint);
     let cyl = makeCyl(geo, W, H, f);
     // 枠（自動・手動）はおおよそでよい：最初のコマで、缶の左右の輪郭を広く（幅 ±35%）探して合わせ直す。
     // 影や背景の縦線より、缶の輪郭のほうが上から下まで同じ位置に強く出る
     {
-      const ref = refineEdges({ data: first, W, H, ox: 0, oy: 0, f: 1 }, geo, cyl, geo.cx, geo.hw, 1, 58, Math.round(geo.hw * 0.25));
+      // 枠が撮影時の自動検出から来ている（live）ときは信頼できるので、探す幅を ±12% に絞る（広く探すとラベル内の縦線に吸い付くことがある）
+      const live = opts.params && opts.params.live;
+      const ref = refineEdges({ data: first, W, H, ox: 0, oy: 0, f: 1 }, geo, cyl, geo.cx, geo.hw, 1, live ? 20 : 58, Math.round(geo.hw * (live ? 0.08 : 0.25)));
       T.snap = ref ? { from: [Math.round(geo.cx), Math.round(geo.hw)], to: [Math.round(ref.cx), Math.round(ref.hw)] } : null;
       if (ref && Math.abs(ref.hw / geo.hw - 1) > 0.02 || ref && Math.abs(ref.cx - geo.cx) > geo.hw * 0.03) {
         geo.cx = ref.cx; geo.hw = ref.hw; cyl = makeCyl(geo, W, H, f);
@@ -6125,7 +6128,7 @@ body[data-light="warm"] {
       await new Promise((resolve) => {
         let nextT = SAMPLE_DT, done = false, lastT = 0, r = f >= 2 ? Math.min(rate, 2) : rate;   // 4K は 2倍速から（4K・60fps を 4倍速で再生すると、コマが大量に飛ばされる）
         const fin = () => { if (!done) { done = true; video.pause(); resolve(); } };
-        let gapFills = 0;
+        let gapFills = 0, gapDupStop = 0;
         const onFrame = async (_, meta) => {
           if (done) return;
           // 再生は止めずに、届いたコマを処理する（止めて再開する方式は、再開の待ち時間でコマの間隔が空きやすい）
@@ -6138,12 +6141,15 @@ body[data-light="warm"] {
               video.pause();
               for (let tt = lastT + SAMPLE_DT; tt < tNow - SAMPLE_DT * 0.5; tt += SAMPLE_DT) {
                 await seekTo(video, tt); if (done) return;
-                process(grab(), tt); gapFills++;
+                const im = grab();
+                // 飛ばした先で同じ絵が返る（キーフレームにしか止まれない動画）なら、取りに行くのはやめる
+                if (im.dup) { gapDupStop++; break; }
+                process(im, tt); gapFills++;
               }
               await seekTo(video, tNow); if (done) return;
               process(grab(), tNow);
               lastT = tNow; nextT = tNow + SAMPLE_DT * 0.9;
-              r = Math.max(1, r * 0.7); video.playbackRate = r;
+              r = Math.max(1, r * 0.7); video.playbackRate = r; T.gapDupStop = gapDupStop;
               onProgress(Math.min(1, tNow / dur)); T.gapFills = gapFills;
               if (tNow >= dur - 0.05) return fin();
               video.requestVideoFrameCallback(onFrame);
@@ -6442,7 +6448,7 @@ body[data-light="warm"] {
     const stats = {
       fast: true, total: T.total, t: { geometry: T.geometry, decode: T.decode, process: T.process, loop: T.loop, fuse: T.fuse },
       frames: nProc, used: useFrames.length, turn: turns * 360, loop: !!bestLoop, scale: f,
-      size: [C, NH - cut], cut, snap: T.snap, dups: T.dups || 0, rows: T.rows && { ...T.rows, bot: Array.from(rowDis.slice(-40), (x) => Math.round(x)), bst: Array.from(rowSt.slice(-40), (x, i) => { const j = NH - 40 + i; return rowTex[j] ? +(x / rowTex[j]).toFixed(2) : -1; }), btex: Array.from(rowTex.slice(-40), (x, i) => { const j = NH - 40 + i; return rowAll[j] ? +(x / rowAll[j]).toFixed(2) : -1; }) }, gapFills: T.gapFills || 0, rate, duration: dur,
+      size: [C, NH - cut], cut, snap: T.snap, dups: T.dups || 0, rows: T.rows && { ...T.rows, bot: Array.from(rowDis.slice(-40), (x) => Math.round(x)), bst: Array.from(rowSt.slice(-40), (x, i) => { const j = NH - 40 + i; return rowTex[j] ? +(x / rowTex[j]).toFixed(2) : -1; }), btex: Array.from(rowTex.slice(-40), (x, i) => { const j = NH - 40 + i; return rowAll[j] ? +(x / rowAll[j]).toFixed(2) : -1; }) }, gapFills: T.gapFills || 0, gapDupStop: T.gapDupStop || 0, rate, duration: dur,
       quality: !bestLoop ? 'poor' : turns < 1.0 ? 'fair' : 'good',
     };
     return { canvas: out, blob, aspect: C / (NH - cut), stats };
@@ -6466,7 +6472,7 @@ body[data-light="warm"] {
 (function (NS) {
   'use strict';
 
-  const TARGET_DEG = 620;      // 最後の安全装置。ふつうは「最初の絵柄がもう一度見えたら」止める（spin-scan の方式）
+  const TARGET_DEG = 560;      // 最後の安全装置。ふつうは「最初の絵柄がもう一度見えたら」止める（spin-scan の方式）
   const LOOP_MIN_DEG = 280;    // これより前は、一周したかの照合をしない（似た柄の繰り返しで早く止まらないように）
   const LOOP_EXTRA_DEG = 45;   // 一周を確認してから、さらに回す量（つなぎ目の重なり）
   const DEG_GAIN = 1.0;        // iPhone 実機では多めに出ていた（向きを無視して足していたため）。向き付きで足すので補正なし
@@ -6570,7 +6576,7 @@ body[data-light="warm"] {
       let deg = 0, signed = 0, prevBand = null, prevBg = null, tStart = 0, tSpin = 0, lastMove = 0, lastT = 0, recMime = '';
       const speedHist = [];
       let G = { ...GUIDE }, found = false, lastDet = 0, bgDx = 0;
-      let refs = [], loopAt = null, revRun = 0, loopHits = 0; const sharpHist = [];
+      let refs = [], loopAt = null, revRun = 0, loopHits = 0, maxNcc = -1; const sharpHist = [];
       const dc = document.createElement('canvas'), dctx = dc.getContext('2d', { willReadFrequently: true });
       const ac = document.createElement('canvas'), actx = ac.getContext('2d', { willReadFrequently: true });
 
@@ -6582,8 +6588,10 @@ body[data-light="warm"] {
       const setWarn = (t) => { if (t) { warn.textContent = t; warn.hidden = false; } else warn.hidden = true; };
       const setRing = () => {
         // 一周を確認するまでは 400° を目安に、確認後は「確認した所＋重なり」までを残りとして表示
-        const goal = loopAt != null ? loopAt + LOOP_EXTRA_DEG : Math.max(400, deg + 30);
-        const p = Math.min(1, deg / goal);
+        // 一周（360°）を目安に進め、照合で一周を確かめるまでは満タンにしない。確かめたら満タン（色が変わる）
+        const p = loopAt != null ? 1 : Math.min(0.95, deg / 360);
+        ring.parentNode.parentNode.classList.toggle('done', loopAt != null);
+        if (loopAt == null && deg > 360 && state === 'spin') msg.textContent = '一周の確認中です。止まるまで、そのまま回してください';
         ring.style.strokeDashoffset = String(276.5 * (1 - p));
         degEl.textContent = Math.round(deg) + '°';
       };
@@ -6625,6 +6633,18 @@ body[data-light="warm"] {
         } catch (e) { /* 検出できない時は枠をそのまま */ }
       };
 
+      const followCan = () => {
+        try {
+          const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return;
+          const W = 540, H = Math.round(540 * vh / vw);
+          if (dc.width !== W) { dc.width = W; dc.height = H; }
+          dctx.drawImage(v, 0, 0, W, H);
+          const g = NS.fastSpin.measure(dctx.getImageData(0, 0, W, H).data, W, H, { L: (G.cx - G.w / 2) * W, R: (G.cx + G.w / 2) * W, w: G.w * W, top: G.top * H, bot: G.bot * H });
+          const cx = g.cx / W, w = g.hw * 2 / W;
+          if (Math.abs(w / G.w - 1) < 0.1 && Math.abs(cx - G.cx) < G.w * 0.2 && Math.abs(cx - G.cx) > G.w * 0.01) { G = { ...G, cx: G.cx + (cx - G.cx) * 0.5 }; prevBand = null; drawGuide(); }
+        } catch (e) { /* そのまま */ }
+      };
+
       const analyze = () => {
         if (closed) return;
         const vw = v.videoWidth, vh = v.videoHeight;
@@ -6647,6 +6667,8 @@ body[data-light="warm"] {
           }
           // 撮影前：缶の位置と大きさを探して、枠を合わせる（0.6 秒ごと）
           if (state === 'aim' && now - lastDet > 0.6) { lastDet = now; detectCan(); }
+          // 撮影中も 1 秒ごとに缶の位置を確かめ、横に少しずれていたら枠を追従させる（大きさはそのまま）
+          if (state === 'spin' && now - lastDet > 1) { lastDet = now; followCan(); }
           if (prevBand && (state === 'hold' || state === 'spin')) {
             const s0 = shiftOf(prevBand, band, 16);
             const s = { ...s0, dx: s0.dx - bgDx };     // 手ぶれで全体が動いた分は回転に数えない
@@ -6667,7 +6689,8 @@ body[data-light="warm"] {
               // 一周の確認：覚えた絵柄が、もう一度見えたか
               if (loopAt == null && deg >= LOOP_MIN_DEG && refs.length) {
                 let bestR = -1; for (const r of refs) bestR = Math.max(bestR, nccBest(r.band, band));
-                if (bestR > 0.8) { loopHits++; if (loopHits >= 2) { loopAt = deg; msg.textContent = '一周しました。もう少しだけ回してください'; } }
+                maxNcc = Math.max(maxNcc, bestR);
+                if (bestR > 0.72) { loopHits++; if (loopHits >= 2) { loopAt = deg; msg.textContent = '一周しました。もう少しだけ回してください'; } }
                 else loopHits = 0;
               }
               setRing();
@@ -6704,7 +6727,7 @@ body[data-light="warm"] {
           const ext = type.includes('webm') ? 'webm' : 'mp4';
           const file = new File(chunks, `canshelf-360-${Date.now()}.${ext}`, { type });
           const secs = performance.now() / 1000 - tStart;
-          finish({ file, params: { ...G }, deg, secs, mime: type, w: v.videoWidth, h: v.videoHeight });
+          finish({ file, params: { ...G, bot: Math.min(1, G.bot + G.w * 0.06 * (v.videoWidth / v.videoHeight)), live: true }, deg, loopAt, maxNcc: +maxNcc.toFixed(3), secs, mime: type, w: v.videoWidth, h: v.videoHeight });
         };
         rec.start(500);
         tStart = performance.now() / 1000; state = 'hold'; deg = 0; signed = 0; refs = []; loopAt = null; loopHits = 0; revRun = 0; setRing();
@@ -7573,7 +7596,7 @@ body[data-light="warm"] {
       flow.innerHTML = `<div class="photo-pick"><p class="busy">撮影した動画を読み込んでいます…</p></div>`;
       try {
         const ff = await NS.spin360.firstFrame(r.file);
-        video = ff; ff.name = r.file.name; ff.type = r.file.type; ff.size = r.file.size; ff.live = { deg: Math.round(r.deg), secs: +r.secs.toFixed(1), mime: r.mime, w: r.w, h: r.h };
+        video = ff; ff.name = r.file.name; ff.type = r.file.type; ff.size = r.file.size; ff.live = { deg: Math.round(r.deg), loopAt: r.loopAt != null ? Math.round(r.loopAt) : null, maxNcc: r.maxNcc, secs: +r.secs.toFixed(1), mime: r.mime, w: r.w, h: r.h };
         src = ff.frame; spin = null; params = { ...r.params };
         stepCut();
       } catch (err) {
@@ -7612,7 +7635,7 @@ body[data-light="warm"] {
     const stepCut = () => cutStep(flow, src, params, {
       title: '缶を登録', next: mode === 'video' ? '360° を生成' : '次へ',
       onBack: stepPhoto,
-      onNext: (p) => { params = p; if (mode === 'video') stepGenerate(); else stepInfo(info); },
+      onNext: (p) => { const live = params && params.live; params = live ? { ...p, live } : p; if (mode === 'video') stepGenerate(); else stepInfo(info); },
     });
     let info = {};
 
